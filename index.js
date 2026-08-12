@@ -134,6 +134,40 @@ app.get('/', (req, res) => {
           }
           .btn-secondary:hover { background: #21262d; color: #c9d1d9; }
 
+          .dash-cmd-box {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+          }
+
+          .dash-cmd-input {
+            flex: 1;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 10px 12px;
+            color: #e6edf3;
+            font-family: inherit;
+            font-size: 13.5px;
+            outline: none;
+          }
+          .dash-cmd-input:focus {
+            border-color: #238636;
+          }
+
+          .dash-cmd-btn {
+            background: #0d2218;
+            border: 1px solid #238636;
+            color: #3fb950;
+            font-weight: 600;
+            padding: 0 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: background 0.2s;
+          }
+          .dash-cmd-btn:hover { background: #122d1a; }
+
           footer { margin-top: 20px; text-align: center; }
           footer p { font-size: 12px; color: #484f58; margin: 0; }
         </style>
@@ -176,6 +210,16 @@ app.get('/', (req, res) => {
                 <dt>Server address</dt>
                 <dd>${config.server.ip}</dd>
                 <p class="stat-detail">Minecraft server hostname</p>
+              </div>
+              <div class="stat-card">
+                <dt>Send Web Command / Chat</dt>
+                <form onsubmit="sendDashCommand(event)">
+                  <div class="dash-cmd-box">
+                    <input id="dash-cmd-input" class="dash-cmd-input" type="text" placeholder="/login, /say hello, or chat..." autocomplete="off">
+                    <button type="submit" class="dash-cmd-btn">Send</button>
+                  </div>
+                </form>
+                <p id="dash-cmd-feedback" class="stat-detail" style="min-height: 14px; margin-top: 6px;"></p>
               </div>
             </dl>
           </section>
@@ -254,6 +298,32 @@ app.get('/', (req, res) => {
             const data = await r.json();
             alert(data.success ? 'Bot stopped!' : data.msg);
             update();
+          }
+
+          async function sendDashCommand(e) {
+            if (e) e.preventDefault();
+            const input = document.getElementById('dash-cmd-input');
+            const feedback = document.getElementById('dash-cmd-feedback');
+            const cmd = input.value.trim();
+            if (!cmd) return;
+
+            feedback.style.color = '#8b949e';
+            feedback.textContent = 'Sending...';
+
+            try {
+              const r = await fetch('/command', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ command: cmd })
+              });
+              const data = await r.json();
+              feedback.style.color = data.success ? '#3fb950' : '#f85149';
+              feedback.textContent = data.msg || (data.success ? 'Command sent successfully!' : 'Error sending command.');
+              if (data.success) input.value = '';
+            } catch (err) {
+              feedback.style.color = '#f85149';
+              feedback.textContent = 'Failed to reach server.';
+            }
           }
 
           setInterval(update, 5000);
