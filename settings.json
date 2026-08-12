@@ -1,8 +1,8 @@
 {
   "name": "VEN006",
   "bot-account": {
-    "username": "VEN6",
-    "password": "",
+    "username": "VEN006",
+    "password": "7890",
     "type": "offline"
   },
   "server": {
@@ -20,7 +20,7 @@
   "utils": {
     "auto-auth": {
       "enabled": true,
-      "password": "0025"
+      "password": "7890"
     },
     "anti-afk": {
       "enabled": true,
