@@ -10,7 +10,7 @@ const http = require("http");
 const https = require("https");
 
 // ============================================================
-// EXPRESS SERVER - Keep Render/Aternos alive
+// EXPRESS SERVER - Keep Render/Replit alive & Web Interface
 // ============================================================
 const app = express();
 app.use(express.json());
@@ -267,7 +267,7 @@ app.get('/', (req, res) => {
               icon.textContent  = online ? '✓' : '✗';
               label.className   = 'status-label '   + (online ? 'online' : 'offline');
               label.textContent = online ? 'Connected' : 'Disconnected';
-              detail.textContent = online ? 'Bot is active on the server' : 'Attempting to reconnect';
+              detail.textContent = online ? 'Bot is active on the server' : 'Disconnected / Waiting for player clearance';
 
               document.getElementById('uptime-text').textContent = formatUptime(data.uptime);
 
@@ -1152,7 +1152,7 @@ function formatUptime(seconds) {
 }
 
 // ============================================================
-// SELF-PING - Prevent Render from sleeping
+// SELF-PING - Prevent Render/Replit from sleeping
 // ============================================================
 const SELF_PING_INTERVAL = 10 * 60 * 1000;
 
@@ -1198,6 +1198,10 @@ let reconnectTimeoutId = null;
 let connectionTimeoutId = null;
 let isReconnecting = false;
 
+// 2 Hours 30 Minutes Delay Config
+const PLAYER_AVOIDANCE_DELAY = 2.5 * 60 * 60 * 1000; // 2h 30m in ms
+let isWaitingForPlayerClear = false;
+
 function clearBotTimeouts() {
   if (reconnectTimeoutId) {
     clearTimeout(reconnectTimeoutId);
@@ -1242,6 +1246,20 @@ function getReconnectDelay() {
   );
   const jitter = Math.floor(Math.random() * 2000);
   return delay + jitter;
+}
+
+function triggerPlayerAvoidanceDisconnect(reasonMessage) {
+  addLog(`[PlayerAvoidance] ${reasonMessage}`);
+  addLog("[PlayerAvoidance] Disconnecting & scheduling reconnect in 2 hours 30 minutes.");
+  isWaitingForPlayerClear = true;
+
+  if (bot) {
+    try {
+      bot.quit("Player active on server");
+    } catch (e) {
+      try { bot.end(); } catch (_) {}
+    }
+  }
 }
 
 function createBot() {
@@ -1310,6 +1328,35 @@ function createBot() {
       addLog(
         `[Bot] [+] Successfully spawned on server! (Version: ${bot.version})`,
       );
+
+      // --- PLAYER DETECTION ON JOIN ---
+      setTimeout(() => {
+        if (!bot || !botState.connected) return;
+
+        const otherPlayers = Object.keys(bot.players).filter(
+          (username) => username !== bot.username
+        );
+
+        if (otherPlayers.length > 0) {
+          triggerPlayerAvoidanceDisconnect(
+            `Found ${otherPlayers.length} player(s) online (${otherPlayers.join(", ")}).`
+          );
+          return;
+        }
+
+        addLog("[PlayerAvoidance] Server is empty! Keeping bot online.");
+      }, 1500);
+
+      // --- REAL-TIME PLAYER JOIN MONITOR ---
+      bot.on("playerJoined", (player) => {
+        if (!botState.connected) return;
+        if (player.username !== bot.username) {
+          triggerPlayerAvoidanceDisconnect(
+            `Player '${player.username}' joined the server.`
+          );
+        }
+      });
+
       if (
         config.discord &&
         config.discord.events &&
@@ -1422,10 +1469,17 @@ function scheduleReconnect() {
   isReconnecting = true;
   botState.reconnectAttempts++;
 
-  const delay = getReconnectDelay();
-  addLog(
-    `[Bot] Reconnecting in ${delay / 1000}s (attempt #${botState.reconnectAttempts})`,
-  );
+  let delay;
+  if (isWaitingForPlayerClear) {
+    delay = PLAYER_AVOIDANCE_DELAY;
+    isWaitingForPlayerClear = false; // Reset state for next check
+    addLog(`[PlayerAvoidance] Reconnecting in 2 hours 30 minutes (${delay / 1000 / 60} mins)...`);
+  } else {
+    delay = getReconnectDelay();
+    addLog(
+      `[Bot] Reconnecting in ${delay / 1000}s (attempt #${botState.reconnectAttempts})`,
+    );
+  }
 
   reconnectTimeoutId = setTimeout(() => {
     reconnectTimeoutId = null;
@@ -1573,7 +1627,6 @@ function initializeModules(bot, mcData, defaultMove) {
 function customBotLogic(bot, mcData, defaultMove) {
   addLog("[CustomLogic] Custom routines initialized.");
 
-  // Example 1: Respond to in-game chat commands targeting the bot
   bot.on("chat", (username, message) => {
     if (username === bot.username) return;
 
@@ -1599,10 +1652,8 @@ function customBotLogic(bot, mcData, defaultMove) {
     }
   });
 
-  // Example 2: Periodic task registered with addInterval (automatically cleared on disconnect)
   addInterval(() => {
     if (!bot || !botState.connected) return;
-    // Insert periodic task (e.g. check inventory, farm crops, drop items)
   }, 60000);
 }
 
