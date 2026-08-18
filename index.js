@@ -1198,8 +1198,8 @@ let reconnectTimeoutId = null;
 let connectionTimeoutId = null;
 let isReconnecting = false;
 
-// 2 Hours 30 Minutes Delay Config
-const PLAYER_AVOIDANCE_DELAY = 2.5 * 60 * 60 * 1000; // 2h 30m in ms
+// 1 Hour 20 Minutes Delay Config
+const PLAYER_AVOIDANCE_DELAY = 80 * 60 * 1000; // 1h 20m in ms
 let isWaitingForPlayerClear = false;
 
 function clearBotTimeouts() {
@@ -1250,7 +1250,7 @@ function getReconnectDelay() {
 
 function triggerPlayerAvoidanceDisconnect(reasonMessage) {
   addLog(`[PlayerAvoidance] ${reasonMessage}`);
-  addLog("[PlayerAvoidance] Disconnecting & scheduling reconnect in 2 hours 30 minutes.");
+  addLog("[PlayerAvoidance] Disconnecting & scheduling reconnect in 1 hour 20 minutes.");
   isWaitingForPlayerClear = true;
 
   if (bot) {
@@ -1473,7 +1473,7 @@ function scheduleReconnect() {
   if (isWaitingForPlayerClear) {
     delay = PLAYER_AVOIDANCE_DELAY;
     isWaitingForPlayerClear = false; // Reset state for next check
-    addLog(`[PlayerAvoidance] Reconnecting in 2 hours 30 minutes (${delay / 1000 / 60} mins)...`);
+    addLog(`[PlayerAvoidance] Reconnecting in 1 hour 20 minutes (${delay / 1000 / 60} mins)...`);
   } else {
     delay = getReconnectDelay();
     addLog(
@@ -1630,11 +1630,19 @@ function customBotLogic(bot, mcData, defaultMove) {
   bot.on("chat", (username, message) => {
     if (username === bot.username) return;
 
-    if (message.startsWith("!ping")) {
+    const lowerMsg = message.toLowerCase();
+
+    // The new status command
+    if (lowerMsg === "status" || lowerMsg === "!status") {
+      const ping = (bot.players[bot.username] && bot.players[bot.username].ping) || "N/A";
+      bot.chat(`[System] Ping: ${ping}ms | Status: Stable. Monitoring: Active.`);
+    }
+
+    if (lowerMsg.startsWith("!ping")) {
       bot.chat(`Pong! (${username})`);
     }
 
-    if (message.startsWith("!come")) {
+    if (lowerMsg.startsWith("!come")) {
       const player = bot.players[username];
       if (player && player.entity) {
         bot.pathfinder.setMovements(defaultMove);
