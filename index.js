@@ -110,6 +110,7 @@ app.get('/', (req, res) => {
           .controls { margin-top: 8px; }
           .btn-grid { display: grid; gap: 10px; margin-bottom: 10px; }
           .btn-grid-2 { grid-template-columns: 1fr 1fr; }
+          .btn-grid-3 { grid-template-columns: 1fr 1fr 1fr; }
 
           .btn-primary {
             min-height: 52px; border-radius: 10px;
@@ -122,6 +123,7 @@ app.get('/', (req, res) => {
           .btn-primary:active { opacity: 0.85; }
           .btn-start { border: 2px solid #238636; background: #0d2218; color: #3fb950; }
           .btn-stop  { border: 2px solid #da3633; background: #200d0d; color: #f85149; }
+          .btn-force { border: 2px solid #d29922; background: #221a0d; color: #e3b341; }
 
           .btn-secondary {
             min-height: 44px; border-radius: 10px;
@@ -225,9 +227,10 @@ app.get('/', (req, res) => {
           </section>
 
           <section class="controls" aria-label="Bot controls">
-            <div class="btn-grid btn-grid-2">
-              <button class="btn-primary btn-start" onclick="startBot()" aria-label="Start bot">Start bot</button>
-              <button class="btn-primary btn-stop" onclick="stopBot()" aria-label="Stop bot">Stop bot</button>
+            <div class="btn-grid btn-grid-3">
+              <button class="btn-primary btn-start" onclick="startBot()" aria-label="Start bot">Start</button>
+              <button class="btn-primary btn-stop" onclick="stopBot()" aria-label="Stop bot">Stop</button>
+              <button class="btn-primary btn-force" onclick="forceJoin()" aria-label="Force join">Force Join</button>
             </div>
             <div class="btn-grid btn-grid-2">
               <a href="/tutorial" class="btn-secondary" aria-label="View setup guide">Setup guide</a>
@@ -242,6 +245,8 @@ app.get('/', (req, res) => {
         </main>
 
         <script>
+          let countdownInterval = null;
+
           function formatUptime(s) {
             const h = Math.floor(s / 3600);
             const m = Math.floor((s % 3600) / 60);
@@ -267,7 +272,26 @@ app.get('/', (req, res) => {
               icon.textContent  = online ? '✓' : '✗';
               label.className   = 'status-label '   + (online ? 'online' : 'offline');
               label.textContent = online ? 'Connected' : 'Disconnected';
-              detail.textContent = online ? 'Bot is active on the server' : 'Disconnected / Waiting for player clearance';
+
+              // Handle live countdown rendering for delays
+              clearInterval(countdownInterval);
+              if (!online && data.delayEndTime && data.delayEndTime > Date.now()) {
+                const updateCountdown = () => {
+                  const diff = Math.max(0, Math.floor((data.delayEndTime - Date.now()) / 1000));
+                  if (diff === 0) {
+                    detail.textContent = 'Reconnecting now...';
+                    clearInterval(countdownInterval);
+                  } else {
+                    const m = Math.floor(diff / 60);
+                    const s = diff % 60;
+                    detail.textContent = 'Waiting for delay... (' + (m > 0 ? m + 'm ' : '') + s + 's remaining)';
+                  }
+                };
+                updateCountdown();
+                countdownInterval = setInterval(updateCountdown, 1000);
+              } else {
+                detail.textContent = online ? 'Bot is active on the server' : 'Disconnected / Waiting for player clearance';
+              }
 
               document.getElementById('uptime-text').textContent = formatUptime(data.uptime);
 
@@ -297,6 +321,13 @@ app.get('/', (req, res) => {
             const r = await fetch('/stop', { method: 'POST' });
             const data = await r.json();
             alert(data.success ? 'Bot stopped!' : data.msg);
+            update();
+          }
+
+          async function forceJoin() {
+            const r = await fetch('/force-join', { method: 'POST' });
+            const data = await r.json();
+            alert(data.msg);
             update();
           }
 
@@ -541,6 +572,7 @@ app.get("/health", (req, res) => {
     lastActivity: botState.lastActivity,
     reconnectAttempts: botState.reconnectAttempts,
     memoryUsage: process.memoryUsage().heapUsed / 1024 / 1024,
+    delayEndTime: isReconnecting ? delayEndTime : null
   });
 });
 
@@ -1071,6 +1103,32 @@ app.post("/stop", (req, res) => {
   res.json({ success: true });
 });
 
+app.post("/force-join", (req, res) => {
+  if (botState.connected) {
+    return res.json({ success: false, msg: "Bot is already connected." });
+  }
+
+  // Cancel any ongoing delays and reset statuses
+  botRunning = true;
+  clearBotTimeouts();
+  isReconnecting = false;
+  isWaitingForPlayerClear = false;
+  delayEndTime = 0;
+  botState.wasThrottled = false;
+  botState.reconnectAttempts = 0;
+
+  addLog("[Control] Delay cancelled via web panel. Forcing instant join.");
+  
+  if (bot) {
+    try { bot.end(); } catch (e) {}
+    bot = null;
+  }
+  
+  createBot();
+
+  res.json({ success: true, msg: "Force join initiated! Bypassing delays." });
+});
+
 app.post("/command", express.json(), (req, res) => {
   const cmd = (req.body.command || "").trim();
   if (!cmd) return res.json({ success: false, msg: "Empty command." });
@@ -1197,6 +1255,8 @@ let activeIntervals = [];
 let reconnectTimeoutId = null;
 let connectionTimeoutId = null;
 let isReconnecting = false;
+
+let delayEndTime = 0; // Tracks when the delay completes
 
 // 1 Hour 20 Minutes Delay Config
 const PLAYER_AVOIDANCE_DELAY = 80 * 60 * 1000; // 1h 20m in ms
@@ -1481,9 +1541,12 @@ function scheduleReconnect() {
     );
   }
 
+  delayEndTime = Date.now() + delay;
+
   reconnectTimeoutId = setTimeout(() => {
     reconnectTimeoutId = null;
     isReconnecting = false;
+    delayEndTime = 0;
     createBot();
   }, delay);
 }
