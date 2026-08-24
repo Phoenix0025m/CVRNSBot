@@ -273,7 +273,6 @@ app.get('/', (req, res) => {
               label.className   = 'status-label '   + (online ? 'online' : 'offline');
               label.textContent = online ? 'Connected' : 'Disconnected';
 
-              // Handle live countdown rendering for delays
               clearInterval(countdownInterval);
               if (!online && data.delayEndTime && data.delayEndTime > Date.now()) {
                 const updateCountdown = () => {
@@ -290,7 +289,7 @@ app.get('/', (req, res) => {
                 updateCountdown();
                 countdownInterval = setInterval(updateCountdown, 1000);
               } else {
-                detail.textContent = online ? 'Bot is active on the server' : 'Disconnected / Waiting for player clearance';
+                detail.textContent = online ? 'Bot is active on the server' : 'Disconnected / Reconnecting';
               }
 
               document.getElementById('uptime-text').textContent = formatUptime(data.uptime);
@@ -1108,7 +1107,6 @@ app.post("/force-join", (req, res) => {
     return res.json({ success: false, msg: "Bot is already connected." });
   }
 
-  // Cancel any ongoing delays and reset statuses
   botRunning = true;
   clearBotTimeouts();
   isReconnecting = false;
@@ -1256,10 +1254,9 @@ let reconnectTimeoutId = null;
 let connectionTimeoutId = null;
 let isReconnecting = false;
 
-let delayEndTime = 0; // Tracks when the delay completes
+let delayEndTime = 0;
 
-// 1 Hour 20 Minutes Delay Config
-const PLAYER_AVOIDANCE_DELAY = 80 * 60 * 1000; // 1h 20m in ms
+const PLAYER_AVOIDANCE_DELAY = 80 * 60 * 1000;
 let isWaitingForPlayerClear = false;
 
 function clearBotTimeouts() {
@@ -1298,8 +1295,8 @@ function getReconnectDelay() {
     return throttleDelay;
   }
 
-  const baseDelay = config.utils["auto-reconnect-delay"] || 3000;
-  const maxDelay = config.utils["max-reconnect-delay"] || 30000;
+  const baseDelay = config.utils ? config.utils["auto-reconnect-delay"] || 3000 : 3000;
+  const maxDelay = config.utils ? config.utils["max-reconnect-delay"] || 30000 : 30000;
   const delay = Math.min(
     baseDelay * Math.pow(2, botState.reconnectAttempts),
     maxDelay,
@@ -1355,7 +1352,7 @@ function createBot() {
       port: config.server.port,
       version: botVersion,
       hideErrors: false,
-      checkTimeoutInterval: 600000,
+      checkTimeoutInterval: 30000, // Fixed: 30s standard keep-alive interval
     });
 
     bot.loadPlugin(pathfinder);
@@ -1389,33 +1386,35 @@ function createBot() {
         `[Bot] [+] Successfully spawned on server! (Version: ${bot.version})`,
       );
 
-      // --- PLAYER DETECTION ON JOIN ---
-      setTimeout(() => {
-        if (!bot || !botState.connected) return;
+      // --- OPTIONAL PLAYER DETECTION ON JOIN ---
+      const isAvoidanceEnabled = config.utils && config.utils["player-avoidance"] && config.utils["player-avoidance"].enabled;
+      
+      if (isAvoidanceEnabled) {
+        setTimeout(() => {
+          if (!bot || !botState.connected) return;
 
-        const otherPlayers = Object.keys(bot.players).filter(
-          (username) => username !== bot.username
-        );
-
-        if (otherPlayers.length > 0) {
-          triggerPlayerAvoidanceDisconnect(
-            `Found ${otherPlayers.length} player(s) online (${otherPlayers.join(", ")}).`
+          const otherPlayers = Object.keys(bot.players).filter(
+            (username) => username !== bot.username
           );
-          return;
-        }
 
-        addLog("[PlayerAvoidance] Server is empty! Keeping bot online.");
-      }, 1500);
+          if (otherPlayers.length > 0) {
+            triggerPlayerAvoidanceDisconnect(
+              `Found ${otherPlayers.length} player(s) online (${otherPlayers.join(", ")}).`
+            );
+          } else {
+            addLog("[PlayerAvoidance] Server is empty! Keeping bot online.");
+          }
+        }, 1500);
 
-      // --- REAL-TIME PLAYER JOIN MONITOR ---
-      bot.on("playerJoined", (player) => {
-        if (!botState.connected) return;
-        if (player.username !== bot.username) {
-          triggerPlayerAvoidanceDisconnect(
-            `Player '${player.username}' joined the server.`
-          );
-        }
-      });
+        bot.on("playerJoined", (player) => {
+          if (!botState.connected) return;
+          if (player.username !== bot.username) {
+            triggerPlayerAvoidanceDisconnect(
+              `Player '${player.username}' joined the server.`
+            );
+          }
+        });
+      }
 
       if (
         config.discord &&
@@ -1442,7 +1441,7 @@ function createBot() {
           bot.chat("/gamemode creative");
           addLog("[INFO] Attempted to set creative mode (requires OP)");
         }
-      }, 3000);
+      }, 5000);
 
       bot.on("messagestr", (message) => {
         if (
@@ -1532,7 +1531,7 @@ function scheduleReconnect() {
   let delay;
   if (isWaitingForPlayerClear) {
     delay = PLAYER_AVOIDANCE_DELAY;
-    isWaitingForPlayerClear = false; // Reset state for next check
+    isWaitingForPlayerClear = false;
     addLog(`[PlayerAvoidance] Reconnecting in 1 hour 20 minutes (${delay / 1000 / 60} mins)...`);
   } else {
     delay = getReconnectDelay();
@@ -1558,7 +1557,7 @@ function initializeModules(bot, mcData, defaultMove) {
   addLog("[Modules] Initializing all modules...");
 
   // ---------- AUTO AUTH ----------
-  if (config.utils["auto-auth"] && config.utils["auto-auth"].enabled) {
+  if (config.utils && config.utils["auto-auth"] && config.utils["auto-auth"].enabled) {
     const password = config.utils["auto-auth"].password;
     let authHandled = false;
 
@@ -1594,7 +1593,7 @@ function initializeModules(bot, mcData, defaultMove) {
   }
 
   // ---------- CHAT MESSAGES ----------
-  if (config.utils["chat-messages"] && config.utils["chat-messages"].enabled) {
+  if (config.utils && config.utils["chat-messages"] && config.utils["chat-messages"].enabled) {
     const messages = config.utils["chat-messages"].messages;
     if (config.utils["chat-messages"].repeat) {
       let i = 0;
@@ -1628,7 +1627,7 @@ function initializeModules(bot, mcData, defaultMove) {
   }
 
   // ---------- ANTI-AFK ----------
-  if (config.utils["anti-afk"] && config.utils["anti-afk"].enabled) {
+  if (config.utils && config.utils["anti-afk"] && config.utils["anti-afk"].enabled) {
     addInterval(() => {
       if (!bot || !botState.connected) return;
       try { bot.swingArm(); } catch (e) {}
@@ -1661,31 +1660,25 @@ function initializeModules(bot, mcData, defaultMove) {
   }
 
   // ---------- DEFAULT BUILT-IN MODULES ----------
-  if (config.modules.avoidMobs && !config.modules.combat) {
+  if (config.modules && config.modules.avoidMobs && !config.modules.combat) {
     avoidMobs(bot);
   }
-  if (config.modules.combat) {
+  if (config.modules && config.modules.combat) {
     combatModule(bot, mcData);
   }
-  if (config.modules.beds) {
+  if (config.modules && config.modules.beds) {
     bedModule(bot, mcData);
   }
-  if (config.modules.chat) {
+  if (config.modules && config.modules.chat) {
     chatModule(bot);
   }
 
-  // ============================================================
-  // >>> PLACE YOUR OWN CUSTOM LOGIC HOOKS HERE <<<
-  // ============================================================
   customBotLogic(bot, mcData, defaultMove);
-
   addLog("[Modules] All modules initialized!");
 }
 
 // ============================================================
 // CUSTOM LOGIC HOOKS
-// Write your custom bot behaviors inside this function or add
-// new functions called from here.
 // ============================================================
 function customBotLogic(bot, mcData, defaultMove) {
   addLog("[CustomLogic] Custom routines initialized.");
@@ -1695,7 +1688,6 @@ function customBotLogic(bot, mcData, defaultMove) {
 
     const lowerMsg = message.toLowerCase();
 
-    // The new status command
     if (lowerMsg === "status" || lowerMsg === "!status") {
       const ping = (bot.players[bot.username] && bot.players[bot.username].ping) || "N/A";
       bot.chat(`[System] Ping: ${ping}ms | Status: Stable. Monitoring: Active.`);
@@ -1707,7 +1699,7 @@ function customBotLogic(bot, mcData, defaultMove) {
 
     if (lowerMsg.startsWith("!come")) {
       const player = bot.players[username];
-      if (player && player.entity) {
+      if (player && player.entity && player.entity.position) {
         bot.pathfinder.setMovements(defaultMove);
         bot.pathfinder.setGoal(
           new GoalBlock(
@@ -1732,12 +1724,12 @@ function customBotLogic(bot, mcData, defaultMove) {
 // DEFAULT MOVEMENT & BUILT-IN MODULE HELPERS
 // ============================================================
 function startCircleWalk(bot, defaultMove) {
-  const radius = config.movement["circle-walk"].radius;
+  const radius = config.movement["circle-walk"].radius || 3;
   let angle = 0;
   let lastPathTime = 0;
 
   addInterval(() => {
-    if (!bot || !botState.connected) return;
+    if (!bot || !botState.connected || !bot.entity || !bot.entity.position) return;
     const now = Date.now();
     if (now - lastPathTime < 2000) return;
     lastPathTime = now;
@@ -1757,7 +1749,7 @@ function startCircleWalk(bot, defaultMove) {
     } catch (e) {
       addLog("[CircleWalk] Error:", e.message);
     }
-  }, config.movement["circle-walk"].speed);
+  }, config.movement["circle-walk"].speed || 1000);
 }
 
 function startRandomJump(bot) {
@@ -1773,12 +1765,12 @@ function startRandomJump(bot) {
     } catch (e) {
       addLog("[RandomJump] Error:", e.message);
     }
-  }, config.movement["random-jump"].interval);
+  }, config.movement["random-jump"].interval || 10000);
 }
 
 function startLookAround(bot) {
   addInterval(() => {
-    if (!bot || !botState.connected) return;
+    if (!bot || !botState.connected || !bot.entity) return;
     try {
       const yaw = Math.random() * Math.PI * 2 - Math.PI;
       const pitch = (Math.random() * Math.PI) / 2 - Math.PI / 4;
@@ -1787,13 +1779,13 @@ function startLookAround(bot) {
     } catch (e) {
       addLog("[LookAround] Error:", e.message);
     }
-  }, config.movement["look-around"].interval);
+  }, config.movement["look-around"].interval || 5000);
 }
 
 function avoidMobs(bot) {
   const safeDistance = 5;
   addInterval(() => {
-    if (!bot || !botState.connected || typeof bot.setControlState !== "function") return;
+    if (!bot || !botState.connected || !bot.entity || !bot.entity.position || typeof bot.setControlState !== "function") return;
     try {
       const entities = Object.values(bot.entities).filter(
         (e) =>
@@ -1824,8 +1816,8 @@ function combatModule(bot, mcData) {
   let lockedTargetExpiry = 0;
 
   bot.on("physicsTick", () => {
-    if (!bot || !botState.connected) return;
-    if (!config.combat["attack-mobs"]) return;
+    if (!bot || !botState.connected || !bot.entity || !bot.entity.position) return;
+    if (!config.combat || !config.combat["attack-mobs"]) return;
 
     const now = Date.now();
     if (now - lastAttackTime < 620) return;
@@ -1865,7 +1857,7 @@ function combatModule(bot, mcData) {
   });
 
   bot.on("health", () => {
-    if (!config.combat["auto-eat"]) return;
+    if (!config.combat || !config.combat["auto-eat"]) return;
     try {
       if (bot.food < 14) {
         const food = bot.inventory
@@ -1889,11 +1881,11 @@ function bedModule(bot, mcData) {
 
   addInterval(async () => {
     if (!bot || !botState.connected) return;
-    if (!config.beds["place-night"]) return;
+    if (!config.beds || !config.beds["place-night"]) return;
 
     try {
       const isNight =
-        bot.time.timeOfDay >= 12500 && bot.time.timeOfDay <= 23500;
+        bot.time && bot.time.timeOfDay >= 12500 && bot.time.timeOfDay <= 23500;
 
       if (isNight && !isTryingToSleep) {
         const bedBlock = bot.findBlock({
@@ -2026,7 +2018,7 @@ function sendDiscordWebhook(content, color = 0x0099ff) {
 }
 
 // ============================================================
-// CRASH RECOVERY & IMMORTAL MODE (Keep-Alive Protection)
+// CRASH RECOVERY & KEEP-ALIVE PROTECTION
 // ============================================================
 process.on("uncaughtException", (err) => {
   const msg = err.message || "Unknown";
