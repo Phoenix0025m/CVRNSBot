@@ -7,8 +7,8 @@
   },
   "server": {
     "ip": "15.235.165.81",
-    "port": 26060,
-    "version": "1.21.11",
+    "port": 26061,
+    "version": "1.21.1",
     "try-creative": false
   },
   "position": {
