@@ -281,9 +281,14 @@ app.get('/', (req, res) => {
                     detail.textContent = 'Reconnecting now...';
                     clearInterval(countdownInterval);
                   } else {
-                    const m = Math.floor(diff / 60);
+                    const h = Math.floor(diff / 3600);
+                    const m = Math.floor((diff % 3600) / 60);
                     const s = diff % 60;
-                    detail.textContent = 'Waiting for delay... (' + (m > 0 ? m + 'm ' : '') + s + 's remaining)';
+                    let timeStr = '';
+                    if (h > 0) timeStr += h + 'h ';
+                    if (m > 0 || h > 0) timeStr += m + 'm ';
+                    timeStr += s + 's';
+                    detail.textContent = 'Waiting for delay... (' + timeStr + ' remaining)';
                   }
                 };
                 updateCountdown();
@@ -380,7 +385,6 @@ app.get("/tutorial", (req, res) => {
       </head>
       <body>
         <main>
-          <!-- Tutorial HTML omitted for brevity to save space -->
           <h2>Tutorial Page Loaded</h2>
         </main>
       </body>
@@ -936,6 +940,7 @@ app.post("/force-join", (req, res) => {
   clearBotTimeouts();
   isReconnecting = false;
   isWaitingForPlayerClear = false;
+  isNightSleep = false;
   delayEndTime = 0;
   botState.wasThrottled = false;
   botState.reconnectAttempts = 0;
@@ -1041,7 +1046,7 @@ function startSelfPing() {
   const renderUrl = process.env.RENDER_EXTERNAL_URL;
   if (!renderUrl) {
     addLog(
-      "[KeepAlive] No RENDER_EXTERNAL_URL set - self-ping disabled (running locally)",
+      "[KeepAlive] No RENDER_EXTERNAL_URL set - self-ping disabled (running locally). Add environment variable RENDER_EXTERNAL_URL to enable.",
     );
     return;
   }
@@ -1082,7 +1087,10 @@ let isReconnecting = false;
 let delayEndTime = 0;
 
 const PLAYER_AVOIDANCE_DELAY = 80 * 60 * 1000;
+const NIGHT_SLEEP_DELAY = 4 * 60 * 60 * 1000; // 4 Hours
 let isWaitingForPlayerClear = false;
+let isNightSleep = false;
+let lastNightSleepDate = null;
 
 function clearBotTimeouts() {
   if (reconnectTimeoutId) {
@@ -1197,7 +1205,6 @@ function createBot() {
 
     let spawnHandled = false;
 
-    // --- NEW: RESOURCE PACK RECEIVER ---
     bot.on("resourcePack", (url, hash) => {
       addLog(`[ResourcePack] Server offered a resource pack from: ${url}`);
       try {
@@ -1222,6 +1229,26 @@ function createBot() {
         `[Bot] [+] Successfully spawned on server! (Version: ${bot.version})`,
       );
 
+      // --- NEW: 2 AM Night Sleep Routine Check ---
+      const checkNightRoutine = () => {
+        if (!bot || !botState.connected) return;
+        const now = new Date();
+        // Check if the real-world hour is 2 AM
+        if (now.getHours() === 2) {
+          if (lastNightSleepDate && lastNightSleepDate.getDate() === now.getDate()) {
+            return; // Already slept tonight, ignore
+          }
+          lastNightSleepDate = now; // Mark as slept for this date
+          addLog("[NightSleep] 2 AM detected. Disconnecting for 4 hours to avoid host suspicion.");
+          isNightSleep = true;
+          try { bot.quit("Night time rest"); } catch(e) { try { bot.end(); } catch(_) {} }
+        }
+      };
+
+      // Check immediately on spawn and then monitor every 60 seconds
+      checkNightRoutine();
+      addInterval(checkNightRoutine, 60000);
+
       const isAvoidanceEnabled = config.utils && config.utils["player-avoidance"] && config.utils["player-avoidance"].enabled;
       
       if (isAvoidanceEnabled) {
@@ -1244,9 +1271,16 @@ function createBot() {
         bot.on("playerJoined", (player) => {
           if (!botState.connected) return;
           if (player.username !== bot.username) {
-            triggerPlayerAvoidanceDisconnect(
-              `Player '${player.username}' joined the server.`
-            );
+            // Wait naturally between 2 to 5 seconds before evacuating
+            const leaveDelay = Math.floor(Math.random() * 3000) + 2000;
+            addLog(`[PlayerAvoidance] Player '${player.username}' joined. Evacuating in ${leaveDelay/1000}s...`);
+            setTimeout(() => {
+              if (botState.connected) {
+                triggerPlayerAvoidanceDisconnect(
+                  `Player '${player.username}' joined the server.`
+                );
+              }
+            }, leaveDelay);
           }
         });
       }
@@ -1288,9 +1322,7 @@ function createBot() {
       });
     });
 
-    // --- ENHANCED: ADVANCED KICK LOGGING ---
     bot.on("kicked", (reason, loggedIn) => {
-      // Stringify the exact object sent by the server for deep debugging
       const kickReason = typeof reason === "object" ? JSON.stringify(reason, null, 2) : reason;
       
       addLog(`[Disconnect - KICKED] The server forcibly kicked the bot.`);
@@ -1322,13 +1354,11 @@ function createBot() {
         config.discord.events &&
         config.discord.events.disconnect
       ) {
-        // Strip newlines for discord webhook so it formats nicely
         const cleanReason = String(kickReason).replace(/\\n|\n|\r/g, " ");
         sendDiscordWebhook(`[!] **Kicked**: ${cleanReason}`, 0xff0000);
       }
     });
 
-    // --- ENHANCED: ADVANCED END LOGGING ---
     bot.on("end", (reason) => {
       const endReason = typeof reason === "object" ? JSON.stringify(reason, null, 2) : (reason || "No reason provided by server");
       
@@ -1353,7 +1383,6 @@ function createBot() {
       scheduleReconnect();
     });
 
-    // --- ENHANCED: ADVANCED ERROR LOGGING ---
     bot.on("error", (err) => {
       addLog(`[Bot Error] An error occurred in the bot process.`);
       addLog(`[Bot Error] Message: ${err.message}`);
@@ -1381,7 +1410,11 @@ function scheduleReconnect() {
   botState.reconnectAttempts++;
 
   let delay;
-  if (isWaitingForPlayerClear) {
+  if (isNightSleep) {
+    delay = NIGHT_SLEEP_DELAY;
+    isNightSleep = false;
+    addLog(`[NightSleep] Reconnecting in 4 hours (${delay / 1000 / 60 / 60} hours)...`);
+  } else if (isWaitingForPlayerClear) {
     delay = PLAYER_AVOIDANCE_DELAY;
     isWaitingForPlayerClear = false;
     addLog(`[PlayerAvoidance] Reconnecting in 1 hour 20 minutes (${delay / 1000 / 60} mins)...`);
@@ -1408,7 +1441,6 @@ function scheduleReconnect() {
 function initializeModules(bot, mcData, defaultMove) {
   addLog("[Modules] Initializing all modules...");
 
-  // ---------- AUTO AUTH ----------
   if (config.utils && config.utils["auto-auth"] && config.utils["auto-auth"].enabled) {
     const password = config.utils["auto-auth"].password;
     let authHandled = false;
@@ -1444,7 +1476,6 @@ function initializeModules(bot, mcData, defaultMove) {
     }, 10000);
   }
 
-  // ---------- CHAT MESSAGES ----------
   if (config.utils && config.utils["chat-messages"] && config.utils["chat-messages"].enabled) {
     const messages = config.utils["chat-messages"].messages;
     if (config.utils["chat-messages"].repeat) {
@@ -1465,7 +1496,6 @@ function initializeModules(bot, mcData, defaultMove) {
     }
   }
 
-  // ---------- POSITION GOAL ----------
   if (
     config.position &&
     config.position.enabled &&
@@ -1478,7 +1508,6 @@ function initializeModules(bot, mcData, defaultMove) {
     addLog("[Position] Navigating to configured position...");
   }
 
-  // ---------- ANTI-AFK ----------
   if (config.utils && config.utils["anti-afk"] && config.utils["anti-afk"].enabled) {
     addInterval(() => {
       if (!bot || !botState.connected) return;
@@ -1494,7 +1523,6 @@ function initializeModules(bot, mcData, defaultMove) {
     }, 30000 + Math.floor(Math.random() * 90000));
   }
 
-  // ---------- MOVEMENT MODULES ----------
   if (config.movement && config.movement.enabled !== false) {
     if (config.movement["circle-walk"] && config.movement["circle-walk"].enabled) {
       startCircleWalk(bot, defaultMove);
@@ -1511,7 +1539,6 @@ function initializeModules(bot, mcData, defaultMove) {
     }
   }
 
-  // ---------- DEFAULT BUILT-IN MODULES ----------
   if (config.modules && config.modules.avoidMobs && !config.modules.combat) {
     avoidMobs(bot);
   }
