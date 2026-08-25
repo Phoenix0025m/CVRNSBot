@@ -199,6 +199,11 @@ app.get('/', (req, res) => {
           <section aria-label="Bot statistics">
             <dl>
               <div class="stat-card">
+                <dt>Server Time (UTC)</dt>
+                <dd id="bot-clock">Loading...</dd>
+                <p class="stat-detail">Live internal bot time</p>
+              </div>
+              <div class="stat-card">
                 <dt>Uptime</dt>
                 <dd id="uptime-text">—</dd>
                 <p class="stat-detail">Time since last connection</p>
@@ -245,6 +250,16 @@ app.get('/', (req, res) => {
         </main>
 
         <script>
+          // NEW CLOCK LOGIC
+          function updateBotTime() {
+            const now = new Date();
+            document.getElementById('bot-clock').textContent = now.toLocaleTimeString('en-US', { 
+                timeZone: 'UTC', hour12: true, hour: 'numeric', minute: 'numeric', second: 'numeric' 
+            });
+          }
+          setInterval(updateBotTime, 1000);
+          updateBotTime();
+
           let countdownInterval = null;
 
           function formatUptime(s) {
@@ -1038,22 +1053,22 @@ function formatUptime(seconds) {
 }
 
 // ============================================================
-// SELF-PING - Prevent Render/Replit from sleeping
+// SELF-PING - Prevent Render from sleeping
 // ============================================================
-const SELF_PING_INTERVAL = 10 * 60 * 1000;
+const SELF_PING_INTERVAL = 10 * 60 * 1000; // 10 minutes
 
 function startSelfPing() {
   const renderUrl = process.env.RENDER_EXTERNAL_URL;
   if (!renderUrl) {
-    addLog(
-      "[KeepAlive] No RENDER_EXTERNAL_URL set - self-ping disabled (running locally). Add environment variable RENDER_EXTERNAL_URL to enable.",
-    );
+    addLog("[KeepAlive] No RENDER_EXTERNAL_URL set - self-ping disabled (running locally)");
     return;
   }
   setInterval(() => {
     const protocol = renderUrl.startsWith("https") ? https : http;
     protocol
-      .get(`${renderUrl}/ping`, (res) => {})
+      .get(`${renderUrl}/ping`, (res) => {
+        // Silent success
+      })
       .on("error", (err) => {
         addLog(`[KeepAlive] Self-ping failed: ${err.message}`);
       });
