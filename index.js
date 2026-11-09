@@ -1,46 +1,43 @@
+
 "use strict";
 
-const { addLog, getLogs } = require("./logger");
+const { addLog } = require("./logger");
 const mineflayer = require("mineflayer");
-const { Movements, pathfinder, goals } = require("mineflayer-pathfinder");
+const { pathfinder } = require("mineflayer-pathfinder");
 const config = require("./settings.json");
 const express = require("express");
 const http = require("http");
 const https = require("https");
 
 // ============================================================
-// GLOBAL STATE & LIFECYCLE VARIABLES
+// BOT STATE
+// The bot is idle when the web app starts. A visitor must press
+// Join Server to begin one connection attempt.
 // ============================================================
+const SESSION_LENGTH_MS = 10 * 1000;
+const CONNECTION_TIMEOUT_MS = 120 * 1000;
+
 let bot = null;
-let activeIntervals = [];
-let reconnectTimeoutId = null;
 let connectionTimeoutId = null;
-let watchdogTimeoutId = null;
-let isReconnecting = false;
-let delayEndTime = 0;
-let botRunning = true;
+let leaveTimeoutId = null;
+let activeAttemptId = 0;
 
-const PLAYER_AVOIDANCE_DELAY = 80 * 60 * 1000;
-const NIGHT_SLEEP_DELAY = 1.5 * 60 * 60 * 1000; 
-
-let isWaitingForPlayerClear = false;
-let isNightSleep = false;
-let lastNightSleepDate = null;
-
-let botState = {
+const botState = {
+  status: "idle", // idle | starting | started | stopped | failed
   connected: false,
+  message: "Click Join Server to connect the bot for 10 seconds.",
   lastActivity: Date.now(),
-  reconnectAttempts: 0,
-  startTime: Date.now(),
-  errors: [],
-  wasThrottled: false,
+  joinedAt: null,
+  finishedAt: null,
+  leaveAt: null,
 };
 
 // ============================================================
-// EXPRESS SERVER & KEEP-ALIVE DASHBOARD
+// EXPRESS SERVER & DASHBOARD
 // ============================================================
 const app = express();
 app.use(express.json());
+
 const PORT = process.env.PORT || 5000;
 
 app.get("/", (req, res) => {
@@ -48,438 +45,1349 @@ app.get("/", (req, res) => {
     <!DOCTYPE html>
     <html lang="en">
       <head>
-        <title>${config.name || 'Minecraft'} Dashboard</title>
+        <title>${config.name || "Minecraft"} Dashboard</title>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+
+        <link rel="stylesheet" media="print"
+          onload="this.media='all'"
+          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+
         <style>
-          *, *::before, *::after { box-sizing: border-box; }
-          body { font-family: 'Inter', -apple-system, sans-serif; background: #0d1117; color: #e6edf3; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 24px; }
-          main { width: 100%; max-width: 400px; }
-          header { margin-bottom: 28px; }
-          header h1 { font-size: 26px; font-weight: 700; color: #f0f6fc; margin: 0; line-height: 1.2; }
-          header p { font-size: 14px; color: #8b949e; margin: 6px 0 0; line-height: 1.5; }
-          .status-section { border-radius: 12px; padding: 20px 24px; margin-bottom: 16px; display: flex; align-items: center; gap: 16px; transition: background 0.3s, border-color 0.3s; }
-          .status-section.online  { background: #0d2218; border: 2px solid #238636; }
-          .status-section.offline { background: #200d0d; border: 2px solid #da3633; }
-          .status-icon { width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 20px; flex-shrink: 0; transition: background 0.3s; }
-          .status-icon.online  { background: #238636; }
-          .status-icon.offline { background: #da3633; }
-          .status-label { font-size: 18px; font-weight: 700; line-height: 1.2; transition: color 0.3s; }
-          .status-label.online  { color: #3fb950; }
-          .status-label.offline { color: #f85149; }
-          .status-detail { font-size: 13px; color: #8b949e; margin-top: 3px; }
-          dl { margin: 0; }
-          .stat-card { background: #161b22; border: 1px solid #21262d; border-radius: 10px; padding: 16px 20px; margin-bottom: 10px; }
-          dt { font-size: 12px; color: #8b949e; font-weight: 600; margin-bottom: 4px; }
-          dd { margin: 0; font-size: 17px; font-weight: 600; color: #e6edf3; line-height: 1.3; }
-          .stat-detail { margin: 4px 0 0; font-size: 11px; color: #6e7681; }
-          .controls { margin-top: 8px; }
-          .btn-grid { display: grid; gap: 10px; margin-bottom: 10px; }
-          .btn-grid-2 { grid-template-columns: 1fr 1fr; }
-          .btn-grid-3 { grid-template-columns: 1fr 1fr 1fr; }
-          .btn-primary { min-height: 52px; border-radius: 10px; font-size: 15px; font-weight: 700; cursor: pointer; transition: opacity 0.2s, filter 0.2s; font-family: inherit; }
-          .btn-primary:hover  { filter: brightness(1.1); }
-          .btn-start { border: 2px solid #238636; background: #0d2218; color: #3fb950; }
-          .btn-stop  { border: 2px solid #da3633; background: #200d0d; color: #f85149; }
-          .btn-force { border: 2px solid #d29922; background: #221a0d; color: #e3b341; }
-          .btn-secondary { min-height: 44px; border-radius: 10px; border: 1px solid #21262d; background: #161b22; color: #8b949e; font-size: 13px; font-weight: 500; text-decoration: none; display: flex; align-items: center; justify-content: center; font-family: inherit; cursor: pointer; }
-          .btn-secondary:hover { background: #21262d; color: #c9d1d9; }
-          .dash-cmd-box { display: flex; gap: 8px; margin-top: 8px; }
-          .dash-cmd-input { flex: 1; background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; color: #e6edf3; font-family: inherit; font-size: 13.5px; outline: none; }
-          .dash-cmd-input:focus { border-color: #238636; }
-          .dash-cmd-btn { background: #0d2218; border: 1px solid #238636; color: #3fb950; font-weight: 600; padding: 0 16px; border-radius: 8px; cursor: pointer; font-family: inherit; }
-          footer { margin-top: 20px; text-align: center; }
-          footer p { font-size: 12px; color: #484f58; margin: 0; }
+          *, *::before, *::after {
+            box-sizing: border-box;
+          }
+
+          body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: #0d1117;
+            color: #e6edf3;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 24px;
+          }
+
+          main {
+            width: 100%;
+            max-width: 400px;
+          }
+
+          header {
+            margin-bottom: 28px;
+          }
+
+          header h1 {
+            font-size: 26px;
+            font-weight: 700;
+            color: #f0f6fc;
+            margin: 0;
+            line-height: 1.2;
+          }
+
+          header p {
+            font-size: 14px;
+            color: #8b949e;
+            margin: 6px 0 0;
+            line-height: 1.5;
+          }
+
+          .status-section {
+            border-radius: 12px;
+            padding: 20px 24px;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            transition: background 0.3s, border-color 0.3s;
+          }
+
+          .status-section.online {
+            background: #0d2218;
+            border: 2px solid #238636;
+          }
+
+          .status-section.offline {
+            background: #161b22;
+            border: 2px solid #30363d;
+          }
+
+          .status-section.starting {
+            background: #221a0d;
+            border: 2px solid #d29922;
+          }
+
+          .status-section.failed {
+            background: #200d0d;
+            border: 2px solid #da3633;
+          }
+
+          .status-icon {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            font-weight: 700;
+            flex-shrink: 0;
+            transition: background 0.3s;
+          }
+
+          .status-icon.online {
+            background: #238636;
+            color: #fff;
+          }
+
+          .status-icon.offline {
+            background: #30363d;
+            color: #c9d1d9;
+          }
+
+          .status-icon.starting {
+            background: #9e6a03;
+            color: #fff;
+          }
+
+          .status-icon.failed {
+            background: #da3633;
+            color: #fff;
+          }
+
+          .status-label {
+            font-size: 18px;
+            font-weight: 700;
+            line-height: 1.2;
+          }
+
+          .status-label.online {
+            color: #3fb950;
+          }
+
+          .status-label.offline {
+            color: #c9d1d9;
+          }
+
+          .status-label.starting {
+            color: #e3b341;
+          }
+
+          .status-label.failed {
+            color: #f85149;
+          }
+
+          .status-detail {
+            font-size: 13px;
+            color: #8b949e;
+            margin-top: 3px;
+            line-height: 1.45;
+          }
+
+          dl {
+            margin: 0;
+          }
+
+          .stat-card {
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 10px;
+            padding: 16px 20px;
+            margin-bottom: 10px;
+          }
+
+          dt {
+            font-size: 12px;
+            color: #8b949e;
+            font-weight: 600;
+            margin-bottom: 4px;
+          }
+
+          dd {
+            margin: 0;
+            font-size: 17px;
+            font-weight: 600;
+            color: #e6edf3;
+            line-height: 1.3;
+          }
+
+          .stat-detail {
+            margin: 4px 0 0;
+            font-size: 11px;
+            color: #6e7681;
+          }
+
+          .controls {
+            margin-top: 8px;
+          }
+
+          .btn-grid {
+            display: grid;
+            gap: 10px;
+            margin-bottom: 10px;
+          }
+
+          .btn-grid-2 {
+            grid-template-columns: 1fr 1fr;
+          }
+
+          .btn-primary {
+            width: 100%;
+            min-height: 52px;
+            border-radius: 10px;
+            font-size: 15px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: opacity 0.2s, filter 0.2s;
+            font-family: inherit;
+          }
+
+          .btn-primary:hover:not(:disabled) {
+            filter: brightness(1.1);
+          }
+
+          .btn-primary:disabled {
+            cursor: not-allowed;
+            opacity: 0.65;
+          }
+
+          .btn-start {
+            border: 2px solid #238636;
+            background: #0d2218;
+            color: #3fb950;
+          }
+
+          .btn-secondary {
+            min-height: 44px;
+            border-radius: 10px;
+            border: 1px solid #21262d;
+            background: #161b22;
+            color: #8b949e;
+            font-size: 13px;
+            font-weight: 500;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: inherit;
+            cursor: pointer;
+          }
+
+          .btn-secondary:hover {
+            background: #21262d;
+            color: #c9d1d9;
+          }
+
+          footer {
+            margin-top: 20px;
+            text-align: center;
+          }
+
+          footer p {
+            font-size: 12px;
+            color: #484f58;
+            margin: 0;
+          }
         </style>
       </head>
+
       <body>
         <main role="main">
+
           <header>
             <h1>AFK Bot Dashboard</h1>
-            <p>Minecraft server bot &middot; Live status</p>
+            <p>Minecraft server bot &middot; Manual 10-second session</p>
           </header>
-          <section id="status-section" class="status-section offline">
-            <div id="status-icon" class="status-icon offline">&#x2717;</div>
+
+          <section id="status-section"
+            class="status-section offline"
+            aria-live="polite">
+
+            <div id="status-icon"
+              class="status-icon offline">○</div>
+
             <div>
-              <div id="status-label" class="status-label offline">Connecting…</div>
-              <div id="status-detail" class="status-detail">Establishing connection</div>
+              <div id="status-label"
+                class="status-label offline">
+                Ready to start
+              </div>
+
+              <div id="status-detail"
+                class="status-detail">
+                Click Join Server to begin.
+              </div>
             </div>
+
           </section>
+
           <section>
             <dl>
+
               <div class="stat-card">
                 <dt>Server Time (UTC)</dt>
                 <dd id="bot-clock">Loading...</dd>
               </div>
+
               <div class="stat-card">
-                <dt>Uptime</dt>
-                <dd id="uptime-text">—</dd>
+                <dt>Connected Duration</dt>
+                <dd id="uptime-text">0 seconds</dd>
               </div>
+
               <div class="stat-card">
                 <dt>Coordinates</dt>
-                <dd id="coords-text">Searching…</dd>
-                <p class="stat-detail">Will appear once fully spawned</p>
+                <dd id="coords-text">—</dd>
+                <p class="stat-detail">
+                  Available after the bot spawns in the world
+                </p>
               </div>
-              <div class="stat-card">
-                <dt>Send Web Command / Chat</dt>
-                <form onsubmit="sendDashCommand(event)">
-                  <div class="dash-cmd-box">
-                    <input id="dash-cmd-input" class="dash-cmd-input" type="text" placeholder="/login password" autocomplete="off">
-                    <button type="submit" class="dash-cmd-btn">Send</button>
-                  </div>
-                </form>
-                <p id="dash-cmd-feedback" class="stat-detail" style="min-height: 14px; margin-top: 6px;"></p>
-              </div>
+
             </dl>
           </section>
+
           <section class="controls">
-            <div class="btn-grid btn-grid-3">
-              <button class="btn-primary btn-start" onclick="startBot()">Start</button>
-              <button class="btn-primary btn-stop" onclick="stopBot()">Stop</button>
-              <button class="btn-primary btn-force" onclick="forceJoin()">Force Join</button>
+
+            <div class="btn-grid">
+              <button
+                id="join-button"
+                class="btn-primary btn-start"
+                type="button"
+                onclick="joinServer()">
+                Join Server
+              </button>
             </div>
+
             <div class="btn-grid btn-grid-2">
-              <a href="/tutorial" class="btn-secondary">Setup guide</a>
-              <a href="/logs" class="btn-secondary">View logs</a>
+              <a href="/tutorial" class="btn-secondary">
+                Setup guide
+              </a>
+
+              <a href="/logs" class="btn-secondary">
+                View logs
+              </a>
             </div>
+
           </section>
-          <footer><p>Status updates every 5 seconds</p></footer>
+
+          <footer>
+            <p>Status updates automatically</p>
+          </footer>
+
         </main>
+
         <script>
+
           function updateBotTime() {
             const now = new Date();
-            document.getElementById('bot-clock').textContent = now.toLocaleTimeString('en-US', { timeZone: 'UTC', hour12: true });
+
+            document.getElementById('bot-clock').textContent =
+              now.toLocaleTimeString('en-US', {
+                timeZone: 'UTC',
+                hour12: true
+              });
           }
+
           setInterval(updateBotTime, 1000);
           updateBotTime();
 
-          let countdownInterval = null;
 
-          function formatUptime(s) {
+          function formatDuration(seconds) {
+            const s = Math.max(0, Number(seconds) || 0);
+
             const h = Math.floor(s / 3600);
             const m = Math.floor((s % 3600) / 60);
             const sec = s % 60;
+
             if (h > 0) return h + 'h ' + m + 'm ' + sec + 's';
             if (m > 0) return m + 'm ' + sec + 's';
+
             return sec + ' seconds';
           }
 
+
           async function update() {
+
             try {
-              const r = await fetch('/health');
-              const data = await r.json();
-              const online = data.status === 'connected';
 
-              const section = document.getElementById('status-section');
-              const icon    = document.getElementById('status-icon');
-              const label   = document.getElementById('status-label');
-              const detail  = document.getElementById('status-detail');
+              const response = await fetch('/health', {
+                cache: 'no-store'
+              });
 
-              section.className = 'status-section ' + (online ? 'online' : 'offline');
-              icon.className    = 'status-icon '    + (online ? 'online' : 'offline');
-              icon.textContent  = online ? '✓' : '✗';
-              label.className   = 'status-label '   + (online ? 'online' : 'offline');
-              label.textContent = online ? 'Connected' : 'Disconnected';
-
-              clearInterval(countdownInterval);
-              if (!online && data.delayEndTime && data.delayEndTime > Date.now()) {
-                const updateCountdown = () => {
-                  const diff = Math.max(0, Math.floor((data.delayEndTime - Date.now()) / 1000));
-                  if (diff === 0) {
-                    detail.textContent = 'Reconnecting now...';
-                    clearInterval(countdownInterval);
-                  } else {
-                    detail.textContent = 'Waiting for delay... (' + formatUptime(diff) + ' remaining)';
-                  }
-                };
-                updateCountdown();
-                countdownInterval = setInterval(updateCountdown, 1000);
-              } else {
-                detail.textContent = online ? 'Bot is active on the server' : 'Disconnected / Reconnecting';
+              if (!response.ok) {
+                throw new Error('Status request failed');
               }
 
-              document.getElementById('uptime-text').textContent = formatUptime(data.uptime);
+              const data = await response.json();
+              const state = data.status || 'idle';
+
+              const views = {
+
+                idle: {
+                  className: 'offline',
+                  icon: '○',
+                  label: 'Ready to start'
+                },
+
+                starting: {
+                  className: 'starting',
+                  icon: '…',
+                  label: 'Server starting…'
+                },
+
+                started: {
+                  className: 'online',
+                  icon: '✓',
+                  label: 'Server started'
+                },
+
+                stopped: {
+                  className: 'offline',
+                  icon: '○',
+                  label: 'Disconnected'
+                },
+
+                failed: {
+                  className: 'failed',
+                  icon: '!',
+                  label: 'Join failed'
+                }
+
+              };
+
+              const view = views[state] || views.idle;
+
+              document.getElementById('status-section').className =
+                'status-section ' + view.className;
+
+              document.getElementById('status-icon').className =
+                'status-icon ' + view.className;
+
+              document.getElementById('status-icon').textContent =
+                view.icon;
+
+              document.getElementById('status-label').className =
+                'status-label ' + view.className;
+
+              document.getElementById('status-label').textContent =
+                view.label;
+
+
+              let detail = data.message || 'Click Join Server to begin.';
+
+              if (state === 'starting') {
+                detail =
+                  'Server starting… Waiting for the bot to spawn in the world.';
+              }
+
+              if (state === 'started') {
+
+                const remaining = Math.max(
+                  0,
+                  Number(data.remainingSeconds) || 0
+                );
+
+                detail =
+                  'Bot joined successfully. It will leave in ' +
+                  remaining +
+                  (remaining === 1 ? ' second.' : ' seconds.');
+
+              }
+
+              document.getElementById('status-detail').textContent =
+                detail;
+
+
+              document.getElementById('uptime-text').textContent =
+                formatDuration(data.uptime);
+
 
               if (data.coords) {
-                document.getElementById('coords-text').textContent = 'X ' + Math.floor(data.coords.x) + ', Y ' + Math.floor(data.coords.y) + ', Z ' + Math.floor(data.coords.z);
+
+                document.getElementById('coords-text').textContent =
+                  'X ' + Math.floor(data.coords.x) +
+                  ', Y ' + Math.floor(data.coords.y) +
+                  ', Z ' + Math.floor(data.coords.z);
+
               } else {
-                document.getElementById('coords-text').textContent = online ? 'Awaiting world chunk loading...' : 'Searching…';
+
+                document.getElementById('coords-text').textContent =
+                  state === 'starting' ? 'Waiting for spawn…' : '—';
+
               }
-            } catch (e) {
-              const label = document.getElementById('status-label');
-              label.className = 'status-label offline';
-              label.textContent = 'Unreachable';
+
+
+              const joinButton =
+                document.getElementById('join-button');
+
+              const busy =
+                state === 'starting' || state === 'started';
+
+              joinButton.disabled = busy;
+
+              joinButton.textContent =
+                state === 'starting'
+                  ? 'Joining…'
+                  : (state === 'started'
+                    ? 'Joined'
+                    : 'Join Server');
+
+            } catch (error) {
+
+              const section =
+                document.getElementById('status-section');
+
+              const icon =
+                document.getElementById('status-icon');
+
+              const label =
+                document.getElementById('status-label');
+
+              section.className = 'status-section failed';
+              icon.className = 'status-icon failed';
+              icon.textContent = '!';
+
+              label.className = 'status-label failed';
+              label.textContent = 'Dashboard unreachable';
+
+              document.getElementById('status-detail').textContent =
+                'Could not retrieve the bot status.';
+
             }
+
           }
 
-          async function startBot() { await fetch('/start', { method: 'POST' }); update(); }
-          async function stopBot() { await fetch('/stop', { method: 'POST' }); update(); }
-          async function forceJoin() { await fetch('/force-join', { method: 'POST' }); update(); }
 
-          async function sendDashCommand(e) {
-            if (e) e.preventDefault();
-            const input = document.getElementById('dash-cmd-input');
-            const feedback = document.getElementById('dash-cmd-feedback');
-            const cmd = input.value.trim();
-            if (!cmd) return;
+          async function joinServer() {
 
-            feedback.style.color = '#8b949e';
-            feedback.textContent = 'Sending...';
+            const button =
+              document.getElementById('join-button');
+
+            button.disabled = true;
+            button.textContent = 'Joining…';
 
             try {
-              const r = await fetch('/command', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command: cmd })
+
+              const response = await fetch('/join', {
+                method: 'POST'
               });
-              const data = await r.json();
-              feedback.style.color = data.success ? '#3fb950' : '#f85149';
-              feedback.textContent = data.msg;
-              if (data.success) input.value = '';
-            } catch (err) {
-              feedback.style.color = '#f85149';
-              feedback.textContent = 'Failed to reach server.';
+
+              const data = await response.json();
+
+              if (!response.ok) {
+
+                document.getElementById('status-detail').textContent =
+                  data.msg || 'A join attempt is already active.';
+
+              }
+
+            } catch (error) {
+
+              document.getElementById('status-detail').textContent =
+                'Could not start the join attempt. Please try again.';
+
             }
+
+            await update();
+
           }
-          setInterval(update, 5000); update();
+
+
+          setInterval(update, 1000);
+          update();
+
         </script>
+
       </body>
     </html>
   `);
 });
 
-app.get("/tutorial", (req, res) => res.send(`<!DOCTYPE html><html><body><h2>Tutorial Page Loaded</h2></body></html>`));
+
+// ============================================================
+// OTHER DASHBOARD ROUTES
+// ============================================================
+
+app.get("/tutorial", (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+      <body>
+        <h2>Tutorial Page Loaded</h2>
+      </body>
+    </html>
+  `);
+});
+
 
 app.get("/health", (req, res) => {
+
+  const isJoined =
+    botState.status === "started" && botState.connected;
+
+  const endTime = botState.finishedAt || Date.now();
+
+  const uptime = botState.joinedAt
+    ? Math.max(
+        0,
+        Math.floor((endTime - botState.joinedAt) / 1000)
+      )
+    : 0;
+
+  res.set("Cache-Control", "no-store");
+
   res.json({
-    status: botState.connected ? "connected" : "disconnected",
-    uptime: Math.floor((Date.now() - botState.startTime) / 1000),
-    coords: bot && bot.entity ? bot.entity.position : null,
-    delayEndTime: isReconnecting ? delayEndTime : null,
+
+    status: botState.status,
+
+    connected: isJoined,
+
+    message: botState.message,
+
+    uptime,
+
+    coords:
+      isJoined && bot && bot.entity
+        ? bot.entity.position
+        : null,
+
+    remainingSeconds:
+      isJoined && botState.leaveAt
+        ? Math.max(
+            0,
+            Math.ceil((botState.leaveAt - Date.now()) / 1000)
+          )
+        : 0,
+
+    canJoin:
+      botState.status !== "starting" &&
+      botState.status !== "started"
+
   });
+
 });
+
 
 app.get("/ping", (req, res) => res.send("pong"));
 
-// Note: Logs endpoint truncated in this visual example for space, but keep your existing /logs route!
+
+// Original supplied file contained a placeholder for this route.
 app.get("/logs", (req, res) => {
-    // Keep your exact existing /logs HTML code here. I have excluded it to save you scrolling space, 
-    // but do not delete your existing logs route block!
-    res.send(`Logs route is functioning. (Keep your original logs HTML block here)`);
+
+  res.send(`
+    Logs route is functioning.
+    (Keep your original logs HTML block here)
+  `);
+
 });
 
-app.post("/start", (req, res) => {
-  if (botRunning) return res.json({ success: false, msg: "Already running" });
-  botRunning = true; createBot();
-  res.json({ success: true });
-});
 
-app.post("/stop", (req, res) => {
-  if (!botRunning) return res.json({ success: false, msg: "Already stopped" });
-  botRunning = false; destroyBot();
-  res.json({ success: true });
-});
+// ============================================================
+// JOIN API
+// ============================================================
 
-app.post("/force-join", (req, res) => {
-  botRunning = true; clearBotTimeouts();
-  isReconnecting = false; isWaitingForPlayerClear = false; isNightSleep = false;
-  botState.reconnectAttempts = 0; delayEndTime = 0;
-  addLog("[Control] Forcing instant join.");
-  destroyBot(); createBot();
-  res.json({ success: true, msg: "Force join initiated!" });
-});
+app.post("/join", (req, res) => {
 
-app.post("/command", (req, res) => {
-  const cmd = (req.body.command || "").trim();
-  if (!cmd) return res.json({ success: false, msg: "Empty command." });
-  if (!bot || !botState.connected) return res.json({ success: false, msg: "Bot is not connected to the server yet." });
+  if (
+    botState.status === "starting" ||
+    botState.status === "started"
+  ) {
 
-  try {
-    bot.chat(cmd);
-    addLog(`[Console] Sent: ${cmd}`);
-    res.json({ success: true, msg: `Sent: ${cmd}` });
-  } catch (err) {
-    res.json({ success: false, msg: err.message });
+    return res.status(409).json({
+
+      success: false,
+
+      msg: "A join attempt is already active.",
+
+      status: botState.status
+
+    });
+
   }
+
+  const result = startJoinAttempt();
+
+  if (!result.success) {
+
+    return res.status(500).json({
+
+      success: false,
+
+      msg: result.message,
+
+      status: botState.status
+
+    });
+
+  }
+
+  return res.status(202).json({
+
+    success: true,
+
+    msg: "Join attempt started.",
+
+    status: botState.status
+
+  });
+
 });
 
-const server = app.listen(PORT, "0.0.0.0", () => addLog(`[Server] Listening on port ${server.address().port}`));
-server.on("error", (err) => { if (err.code === "EADDRINUSE") server.listen(PORT + 1, "0.0.0.0"); });
+
+// ============================================================
+// START EXPRESS SERVER
+// ============================================================
+
+const server = app.listen(PORT, "0.0.0.0", () => {
+
+  addLog(
+    `[Server] Listening on port ${server.address().port}`
+  );
+
+});
+
+server.on("error", (err) => {
+
+  if (err.code === "EADDRINUSE") {
+
+    addLog(
+      `[Server] Port ${PORT} is busy; trying ${Number(PORT) + 1}.`
+    );
+
+    server.listen(Number(PORT) + 1, "0.0.0.0");
+
+  } else {
+
+    addLog(`[Server Error] ${err.message}`);
+
+  }
+
+});
+
 
 // ============================================================
 // SELF-PING & MEMORY MANAGEMENT
 // ============================================================
+
 function startSelfPing() {
+
   setInterval(() => {
-    const targetUrl = process.env.RENDER_EXTERNAL_URL ? `${process.env.RENDER_EXTERNAL_URL}/ping` : `http://127.0.0.1:${PORT}/ping`;
-    const protocol = targetUrl.startsWith("https") ? https : http;
-    protocol.get(targetUrl, (res) => res.resume()).on("error", () => {});
+
+    const targetUrl = process.env.RENDER_EXTERNAL_URL
+      ? `${process.env.RENDER_EXTERNAL_URL}/ping`
+      : `http://127.0.0.1:${PORT}/ping`;
+
+    const protocol =
+      targetUrl.startsWith("https") ? https : http;
+
+    protocol
+      .get(targetUrl, (res) => res.resume())
+      .on("error", () => {});
+
   }, 4 * 60 * 1000);
+
 }
+
 startSelfPing();
 
+
 setInterval(() => {
-  if (global.gc && process.memoryUsage().heapUsed > 180 * 1024 * 1024) global.gc();
+
+  if (
+    global.gc &&
+    process.memoryUsage().heapUsed > 180 * 1024 * 1024
+  ) {
+    global.gc();
+  }
+
 }, 5 * 60 * 1000);
 
+
 // ============================================================
-// BOT LIFECYCLE CONTROLS
+// BOT LIFECYCLE
 // ============================================================
+
 function clearBotTimeouts() {
-  if (reconnectTimeoutId) clearTimeout(reconnectTimeoutId);
-  if (connectionTimeoutId) clearTimeout(connectionTimeoutId);
-  if (watchdogTimeoutId) clearTimeout(watchdogTimeoutId);
-}
 
-function clearAllIntervals() {
-  activeIntervals.forEach((id) => clearInterval(id)); activeIntervals = [];
-}
-
-function addInterval(callback, delay) {
-  const id = setInterval(callback, delay);
-  activeIntervals.push(id); return id;
-}
-
-function destroyBot() {
-  clearAllIntervals(); clearBotTimeouts();
-  if (bot) {
-    try { bot.removeAllListeners(); bot.quit(); } catch (_) {}
-    try { bot.end(); } catch (_) {}
-    bot = null;
+  if (connectionTimeoutId) {
+    clearTimeout(connectionTimeoutId);
   }
-  botState.connected = false;
+
+  if (leaveTimeoutId) {
+    clearTimeout(leaveTimeoutId);
+  }
+
+  connectionTimeoutId = null;
+  leaveTimeoutId = null;
+
 }
 
-function getReconnectDelay() {
-  const baseDelay = config.utils ? config.utils["auto-reconnect-delay"] || 3000 : 3000;
-  return Math.min(baseDelay * Math.pow(2, botState.reconnectAttempts), 30000) + Math.floor(Math.random() * 2000);
-}
 
-// ============================================================
-// CORE BOT LOGIC (WITH GHOST FIXES)
-// ============================================================
-function createBot() {
-  if (!botRunning || isReconnecting) return;
-  destroyBot();
-  addLog(`[Bot] Initiating connection to ${config.server.ip}:${config.server.port}...`);
+function closeBot(targetBot, reason) {
+
+  if (!targetBot) return;
+
+  // Keep a harmless error listener during shutdown.
+  try {
+    targetBot.removeAllListeners();
+    targetBot.on("error", () => {});
+  } catch (_) {}
 
   try {
-    bot = mineflayer.createBot({
-      username: config["bot-account"].username,
-      password: config["bot-account"].password || undefined,
-      auth: config["bot-account"].type,
-      host: config.server.ip,
-      port: config.server.port,
-      version: config.server.version && config.server.version.trim() !== "" ? config.server.version : false,
-      hideErrors: false,
-      checkTimeoutInterval: 30000,
-    });
 
-    bot.loadPlugin(pathfinder);
-
-    // Watchdog: If we can't log in at all within 2 mins, restart.
-    connectionTimeoutId = setTimeout(() => {
-      if (!botState.connected) {
-        addLog("[Bot] Network timeout before login. Recovering...");
-        destroyBot(); scheduleReconnect();
-      }
-    }, 120000);
-
-    // PRE-SPAWN CHAT LISTENER (Vital for breaking out of Auth voids)
-    if (config.utils && config.utils["auto-auth"] && config.utils["auto-auth"].enabled) {
-      const password = config.utils["auto-auth"].password;
-      bot.on("messagestr", (message) => {
-        const msg = message.toLowerCase();
-        if (msg.includes("/register")) bot.chat(`/register ${password} ${password}`);
-        else if (msg.includes("/login")) bot.chat(`/login ${password}`);
-      });
+    if (typeof targetBot.quit === "function") {
+      targetBot.quit(reason);
+    } else if (typeof targetBot.end === "function") {
+      targetBot.end();
     }
 
-    // EVENT: LOGIN (Trigger Dashboard early so you can manually send commands)
-    bot.once("login", () => {
-      addLog(`[Bot] Successfully authenticated on server network! Waiting for chunks...`);
-      botState.connected = true; // Enables dashboard commands
-      clearBotTimeouts(); // Prevent watchdog from killing bot if chunks load slowly
-    });
+  } catch (_) {
 
-    // EVENT: RESOURCE PACK (Force Accept)
-    bot.on("resourcePack", (url) => {
-      addLog(`[ResourcePack] Server required a custom texture pack. Bypassing...`);
-      try {
-        bot.acceptResourcePack();
-      } catch (err) {
-        addLog(`[ResourcePack Error] ${err.message}`);
+    try {
+      if (typeof targetBot.end === "function") {
+        targetBot.end();
       }
+    } catch (_) {}
+
+  }
+
+}
+
+
+// Ends the current attempt and invalidates its event handlers before
+// disconnecting. This prevents accidental automatic reconnection.
+
+function finishAttempt(
+  status,
+  message,
+  attemptId,
+  expectedBot,
+  disconnect = true
+) {
+
+  if (
+    attemptId !== activeAttemptId ||
+    !expectedBot ||
+    bot !== expectedBot
+  ) {
+    return;
+  }
+
+  clearBotTimeouts();
+
+  bot = null;
+
+  botState.connected = false;
+  botState.status = status;
+  botState.message = message;
+  botState.finishedAt = Date.now();
+  botState.leaveAt = null;
+
+  addLog(`[Bot] ${message}`);
+
+  if (disconnect) {
+
+    closeBot(expectedBot, message);
+
+  } else {
+
+    try {
+      expectedBot.removeAllListeners();
+    } catch (_) {}
+
+  }
+
+}
+
+
+// ============================================================
+// START A SINGLE JOIN ATTEMPT
+// ============================================================
+
+function startJoinAttempt() {
+
+  if (
+    botState.status === "starting" ||
+    botState.status === "started"
+  ) {
+
+    return {
+      success: false,
+      message: "A join attempt is already active."
+    };
+
+  }
+
+  clearBotTimeouts();
+
+  const attemptId = ++activeAttemptId;
+
+  botState.status = "starting";
+  botState.connected = false;
+
+  botState.message =
+    "Server starting… Waiting for the bot to spawn in the world.";
+
+  botState.lastActivity = Date.now();
+
+  botState.joinedAt = null;
+  botState.finishedAt = null;
+  botState.leaveAt = null;
+
+  addLog(
+    `[Control] Join requested from the dashboard (attempt ${attemptId}).`
+  );
+
+  const created = createBot(attemptId);
+
+  return created
+    ? { success: true }
+    : { success: false, message: botState.message };
+
+}
+
+
+// ============================================================
+// CORE MINEFLAYER CONNECTION LOGIC
+// ============================================================
+
+function createBot(attemptId) {
+
+  if (
+    attemptId !== activeAttemptId ||
+    botState.status !== "starting"
+  ) {
+    return false;
+  }
+
+  addLog(
+    `[Bot] Initiating connection to ${config.server.ip}:${config.server.port}...`
+  );
+
+  try {
+
+    const currentBot = mineflayer.createBot({
+
+      username: config["bot-account"].username,
+
+      password:
+        config["bot-account"].password || undefined,
+
+      auth: config["bot-account"].type,
+
+      host: config.server.ip,
+
+      port: config.server.port,
+
+      version:
+        config.server.version &&
+        config.server.version.trim() !== ""
+          ? config.server.version
+          : false,
+
+      hideErrors: false,
+
+      checkTimeoutInterval: 30000
+
     });
 
-    // EVENT: SPAWN (Physical entry into the world)
-    bot.once("spawn", () => {
-      botState.lastActivity = Date.now();
-      botState.reconnectAttempts = 0;
-      isReconnecting = false;
-      addLog(`[Bot] [+] Fully spawned in the physical world! (Version: ${bot.version})`);
+    bot = currentBot;
 
-      // Night Sleep Handler
-      const checkNightRoutine = () => {
-        if (!bot || !botState.connected) return;
-        const now = new Date();
-        if (now.getHours() === 20) {
-          if (lastNightSleepDate && lastNightSleepDate.getDate() === now.getDate()) return;
-          lastNightSleepDate = now;
-          addLog("[NightSleep] 8 PM trigger reached. Disconnecting for 1.5 hours rest.");
-          isNightSleep = true; destroyBot(); scheduleReconnect();
+    currentBot.loadPlugin(pathfinder);
+
+
+    // ----------------------------------------------------------
+    // CONNECTION WATCHDOG
+    // Login alone does NOT count as successful joining.
+    // Wait until spawn or timeout.
+    // ----------------------------------------------------------
+
+    connectionTimeoutId = setTimeout(() => {
+
+      if (
+        attemptId === activeAttemptId &&
+        bot === currentBot &&
+        botState.status === "starting"
+      ) {
+
+        finishAttempt(
+
+          "failed",
+
+          "The bot did not spawn before the 120-second connection timeout.",
+
+          attemptId,
+
+          currentBot
+
+        );
+
+      }
+
+    }, CONNECTION_TIMEOUT_MS);
+
+
+    // ----------------------------------------------------------
+    // AUTOMATIC SERVER AUTHENTICATION
+    // Retains the original /login and /register functionality.
+    // ----------------------------------------------------------
+
+    if (
+      config.utils &&
+      config.utils["auto-auth"] &&
+      config.utils["auto-auth"].enabled
+    ) {
+
+      const password =
+        config.utils["auto-auth"].password;
+
+      currentBot.on("messagestr", (message) => {
+
+        if (
+          attemptId !== activeAttemptId ||
+          bot !== currentBot
+        ) {
+          return;
         }
-      };
-      addInterval(checkNightRoutine, 60000);
 
-      // Initialize anti-afk and movement
-      if (config.utils && config.utils["anti-afk"] && config.utils["anti-afk"].enabled) {
-        addInterval(() => { try { bot.swingArm(); } catch (_) {} }, 25000);
+        const msg = String(message).toLowerCase();
+
+        if (msg.includes("/register")) {
+
+          currentBot.chat(
+            `/register ${password} ${password}`
+          );
+
+        } else if (msg.includes("/login")) {
+
+          currentBot.chat(
+            `/login ${password}`
+          );
+
+        }
+
+      });
+
+    }
+
+
+    // ----------------------------------------------------------
+    // LOGIN EVENT
+    // Network authentication succeeded, but the bot may not
+    // have entered the world yet.
+    // ----------------------------------------------------------
+
+    currentBot.once("login", () => {
+
+      if (
+        attemptId !== activeAttemptId ||
+        bot !== currentBot
+      ) {
+        return;
       }
+
+      addLog(
+        "[Bot] Authenticated on the server network; waiting for world spawn confirmation..."
+      );
+
     });
 
-    bot.on("kicked", (reason) => {
-      addLog(`[Disconnect - KICKED] Reason: ${typeof reason === "object" ? JSON.stringify(reason) : reason}`);
-      destroyBot(); scheduleReconnect();
+
+    // ----------------------------------------------------------
+    // RESOURCE PACK
+    // ----------------------------------------------------------
+
+    currentBot.on("resourcePack", () => {
+
+      if (
+        attemptId !== activeAttemptId ||
+        bot !== currentBot
+      ) {
+        return;
+      }
+
+      addLog(
+        "[ResourcePack] Server requested a custom texture pack. Accepting..."
+      );
+
+      try {
+
+        currentBot.acceptResourcePack();
+
+      } catch (err) {
+
+        addLog(
+          `[ResourcePack Error] ${err.message}`
+        );
+
+      }
+
     });
 
-    bot.on("end", (reason) => {
-      addLog(`[Disconnect - END] Connection closed.`);
-      destroyBot(); scheduleReconnect();
+
+    // ----------------------------------------------------------
+    // SUCCESS EVENT
+    // Actual spawn confirms successful entry into the world.
+    // Start the 10-second session only now.
+    // ----------------------------------------------------------
+
+    currentBot.once("spawn", () => {
+
+      if (
+        attemptId !== activeAttemptId ||
+        bot !== currentBot ||
+        botState.status !== "starting"
+      ) {
+        return;
+      }
+
+      if (connectionTimeoutId) {
+        clearTimeout(connectionTimeoutId);
+      }
+
+      connectionTimeoutId = null;
+
+      botState.status = "started";
+      botState.connected = true;
+
+      botState.lastActivity = Date.now();
+      botState.joinedAt = Date.now();
+
+      botState.finishedAt = null;
+
+      botState.leaveAt =
+        Date.now() + SESSION_LENGTH_MS;
+
+      botState.message =
+        "Server started. The bot joined successfully.";
+
+      addLog(
+        `[Bot] [+] Spawn confirmed. Starting the ${SESSION_LENGTH_MS / 1000}-second session. (Version: ${currentBot.version})`
+      );
+
+
+      // --------------------------------------------------------
+      // AUTOMATIC DISCONNECT AFTER 10 SECONDS
+      // --------------------------------------------------------
+
+      leaveTimeoutId = setTimeout(() => {
+
+        finishAttempt(
+
+          "stopped",
+
+          "The bot left the server after 10 seconds. Click Join Server to try again.",
+
+          attemptId,
+
+          currentBot
+
+        );
+
+      }, SESSION_LENGTH_MS);
+
     });
 
-    bot.on("error", (err) => {
-      addLog(`[Bot Error] ${err.message}`);
+
+    // ----------------------------------------------------------
+    // KICK EVENT
+    // ----------------------------------------------------------
+
+    currentBot.on("kicked", (reason) => {
+
+      if (
+        attemptId !== activeAttemptId ||
+        bot !== currentBot
+      ) {
+        return;
+      }
+
+      let reasonText;
+
+      try {
+
+        reasonText =
+          typeof reason === "string"
+            ? reason
+            : JSON.stringify(reason);
+
+      } catch (_) {
+
+        reasonText = String(reason);
+
+      }
+
+      const hadSpawned =
+        botState.status === "started";
+
+      finishAttempt(
+
+        hadSpawned ? "stopped" : "failed",
+
+        hadSpawned
+          ? `The server disconnected the bot before the 10-second session ended. Reason: ${reasonText}`
+          : `The server rejected the join attempt. Reason: ${reasonText}`,
+
+        attemptId,
+
+        currentBot,
+
+        false
+
+      );
+
     });
+
+
+    // ----------------------------------------------------------
+    // END EVENT
+    // ----------------------------------------------------------
+
+    currentBot.on("end", () => {
+
+      if (
+        attemptId !== activeAttemptId ||
+        bot !== currentBot
+      ) {
+        return;
+      }
+
+      const hadSpawned =
+        botState.status === "started";
+
+      finishAttempt(
+
+        hadSpawned ? "stopped" : "failed",
+
+        hadSpawned
+          ? "The connection ended before the 10-second session finished."
+          : "The connection closed before the bot spawned in the world.",
+
+        attemptId,
+
+        currentBot,
+
+        false
+
+      );
+
+    });
+
+
+    // ----------------------------------------------------------
+    // ERROR EVENT
+    // ----------------------------------------------------------
+
+    currentBot.on("error", (err) => {
+
+      if (
+        attemptId !== activeAttemptId ||
+        bot !== currentBot
+      ) {
+        return;
+      }
+
+      addLog(
+        `[Bot Error] ${err.message}`
+      );
+
+      // Continue showing Server starting until the connection
+      // ends or the connection timeout is reached.
+
+    });
+
+
+    return true;
 
   } catch (err) {
-    addLog(`[Bot Setup Error] ${err.message}`);
-    destroyBot(); scheduleReconnect();
+
+    clearBotTimeouts();
+
+    const failedBot = bot;
+
+    bot = null;
+
+    botState.connected = false;
+    botState.status = "failed";
+
+    botState.message =
+      `Bot setup failed: ${err.message}`;
+
+    botState.finishedAt = Date.now();
+    botState.leaveAt = null;
+
+    addLog(
+      `[Bot Setup Error] ${err.message}`
+    );
+
+    closeBot(failedBot, "Bot setup failed");
+
+    return false;
+
   }
+
 }
 
-function scheduleReconnect() {
-  if (!botRunning || isReconnecting) return;
-  clearBotTimeouts();
-  isReconnecting = true; botState.reconnectAttempts++;
 
-  let delay = getReconnectDelay();
-  if (isNightSleep) { delay = NIGHT_SLEEP_DELAY; isNightSleep = false; }
-  delayEndTime = Date.now() + delay;
+// ============================================================
+// IMPORTANT
+// No automatic bot startup.
+// No automatic reconnect.
+// Every join requires a website button click.
+// ============================================================
 
-  reconnectTimeoutId = setTimeout(() => {
-    isReconnecting = false; delayEndTime = 0; createBot();
-  }, delay);
-}
+
+// ============================================================
+// GLOBAL ERROR HANDLING
+// ============================================================
 
 process.on("uncaughtException", (err) => {
-  addLog(`[FATAL] Uncaught Exception: ${err.message}`);
-  isReconnecting = false; destroyBot(); setTimeout(scheduleReconnect, 5000);
-});
-process.on("unhandledRejection", (err) => {
-  addLog(`[FATAL] Unhandled Rejection: ${err}`);
-  if (!isReconnecting && !botState.connected) { destroyBot(); scheduleReconnect(); }
+
+  addLog(
+    `[FATAL] Uncaught Exception: ${err.message}`
+  );
+
+  if (bot) {
+
+    finishAttempt(
+
+      "failed",
+
+      "The bot stopped because of an internal error.",
+
+      activeAttemptId,
+
+      bot
+
+    );
+
+  }
+
 });
 
-createBot();
+
+process.on("unhandledRejection", (err) => {
+
+  addLog(
+    `[FATAL] Unhandled Rejection: ${
+      err && err.message ? err.message : String(err)
+    }`
+  );
+
+  if (bot) {
+
+    finishAttempt(
+
+      "failed",
+
+      "The bot stopped because of an internal error.",
+
+      activeAttemptId,
+
+      bot
+
+    );
+
+  }
+
+});
